@@ -1,3 +1,5 @@
+// Modified in the ezequiel454 fork for forge M3; see FORK.md
+
 package restserver
 
 import (
@@ -9,12 +11,12 @@ import (
 	"github.com/colibriproject-dev/colibri-sdk-go/pkg/base/config"
 	"github.com/colibriproject-dev/colibri-sdk-go/pkg/base/logging"
 	"github.com/colibriproject-dev/colibri-sdk-go/pkg/base/monitoring"
+	"github.com/colibriproject-dev/colibri-sdk-go/pkg/base/observer"
 	"github.com/colibriproject-dev/colibri-sdk-go/pkg/base/security"
 	otelfiber "github.com/gofiber/contrib/v3/otel"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/utils/v2"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -50,7 +52,7 @@ type CustomAuthenticationMiddleware interface {
 
 func authenticationContextFiberMiddleware() fiber.Handler {
 	return func(c fiber.Ctx) error {
-		if !strings.Contains(c.Request().URI().String(), string(AuthenticatedApi)) {
+		if isProtocolRejection(c) || !strings.Contains(c.Request().URI().String(), string(AuthenticatedApi)) {
 			return c.Next()
 		}
 
@@ -63,6 +65,11 @@ func authenticationContextFiberMiddleware() fiber.Handler {
 			return c.Next()
 		}
 
+		if GetErrorWriter() != nil {
+			writeError(newFiberWebContext(c), http.StatusUnauthorized, errUserUnauthenticated)
+			return nil
+		}
+
 		c.Status(http.StatusUnauthorized)
 		c.Request()
 		return c.JSON(&Error{Error: "user not authenticated"})
@@ -71,9 +78,18 @@ func authenticationContextFiberMiddleware() fiber.Handler {
 
 func customAuthenticationContextFiberMiddleware() fiber.Handler {
 	return func(ctx fiber.Ctx) error {
+		if isProtocolRejection(ctx) {
+			return ctx.Next()
+		}
+
 		webCtx := &fiberWebContext{ctx: ctx}
 		authCtx, err := customAuth.Apply(webCtx)
 		if err != nil {
+			if GetErrorWriter() != nil {
+				writeError(webCtx, http.StatusUnauthorized, err)
+				return nil
+			}
+
 			ctx.Status(http.StatusUnauthorized)
 			return ctx.JSON(err)
 		}
@@ -196,6 +212,13 @@ func panicRecoverMiddleware() fiber.Handler {
 	return func(c fiber.Ctx) (err error) {
 		defer func() {
 			if r := recover(); r != nil {
+				if w := GetErrorWriter(); w != nil {
+					// the writer logs what it needs: the panic value never leaves here
+					runWriter(w, newFiberWebContext(c), fiber.StatusInternalServerError, newPanicError(r))
+					err = nil
+					return
+				}
+
 				logging.Error(c.Context()).
 					Err(fmt.Errorf("%v", r)).
 					AddParam("path", c.Path()).
@@ -213,9 +236,11 @@ func panicRecoverMiddleware() fiber.Handler {
 
 func correlationIdMiddleware() fiber.Handler {
 	return func(ctx fiber.Ctx) error {
-		correlationID := ctx.Get("X-Correlation-ID")
-		if correlationID == "" {
-			correlationID = uuid.New().String()
+		// the id is normalized here, before it reaches the context, the logs or the tracing
+		// attribute, and returned on the response
+		correlationID := resolveCorrelationID(ctx.Get("X-Correlation-ID"))
+		if _, header := correlationSettings(); header != "" {
+			ctx.Set(header, correlationID)
 		}
 		ctx.SetContext(logging.InjectCorrelationIDInContext(ctx.Context(), correlationID))
 		if monitoring.UseOTELMonitoring() {
@@ -223,5 +248,27 @@ func correlationIdMiddleware() fiber.Handler {
 			monitoring.AddTransactionAttribute(txn, logging.CorrelationIDParam, correlationID)
 		}
 		return ctx.Next()
+	}
+}
+
+// drainMiddleware counts every request admitted by the instance as running work, so the
+// graceful shutdown waits for it, and refuses the requests that arrive after Stop. The count
+// is released when the chain returns, a panic included. A protocol rejection that fiber answers
+// through the chain was never admitted and is not counted.
+func drainMiddleware(gate admitter) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		if gate == nil || isProtocolRejection(c) {
+			return c.Next()
+		}
+
+		if !gate.admit() {
+			c.Set(fiber.HeaderConnection, "close")
+			writeError(newFiberWebContext(c), http.StatusInternalServerError, ErrDraining)
+
+			return nil
+		}
+		defer observer.DoneRunning()
+
+		return c.Next()
 	}
 }

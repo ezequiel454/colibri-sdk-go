@@ -1,3 +1,5 @@
+// Modified in the ezequiel454 fork for forge M3; see FORK.md
+
 package restserver
 
 import (
@@ -121,7 +123,7 @@ func (f *fiberWebContext) JsonResponse(statusCode int, body any) {
 }
 
 func (f *fiberWebContext) ErrorResponse(statusCode int, err error) {
-	f.JsonResponse(statusCode, Error{err.Error()})
+	writeError(f, statusCode, err)
 }
 
 func (f *fiberWebContext) EmptyResponse(statusCode int) {
