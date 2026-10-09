@@ -1,3 +1,5 @@
+// Modified in the ezequiel454 fork for forge M3; see FORK.md
+
 package sqlDB
 
 import (
@@ -23,7 +25,7 @@ func (o sqlDBObserver) Close() {
 	logging.Info(ctx).Msgf(dbWaitingSafeClose, o.name)
 
 	if err := o.instance.Close(); err != nil {
-		logging.Error(ctx).Err(err).Msgf(dbCloseError, o.name)
+		logging.Error(ctx).ErrType(err).Msgf(dbCloseError, o.name)
 	}
 
 	logging.Info(ctx).Msgf(dbCloseSuccess, o.name)

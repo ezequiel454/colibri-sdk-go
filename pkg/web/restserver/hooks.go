@@ -260,3 +260,22 @@ func ensureCorrelation(c fiber.Ctx) {
 		c.SetContext(logging.InjectCorrelationIDInContext(c.Context(), id))
 	}
 }
+
+// Reset returns the registration state of the package (routes, middlewares, custom
+// authentication, error writer and correlation policy) to that of a fresh process. The package
+// keeps one registration per process, so a second composition in the same process (a test
+// binary run with -count=N, or several scenarios) would otherwise serve the routes, with the
+// handlers, registered by the first one. It is for such tests; a service never calls it. It
+// panics when a server is running: it does not stop anything.
+func Reset() {
+	instMu.Lock()
+	if current != nil {
+		instMu.Unlock()
+		panic("restserver: Reset while a server is running")
+	}
+	instMu.Unlock()
+
+	srvRoutes, customMiddlewares, customAuth = nil, nil, nil
+	SetErrorWriter(nil)
+	SetCorrelationPolicy(nil, "")
+}

@@ -1,3 +1,5 @@
+// Modified in the ezequiel454 fork for forge M3; see FORK.md
+
 package sqlDB
 
 import (
@@ -46,7 +48,7 @@ func executeDatabaseMigration(instance *sql.DB) error {
 	logging.Info(context.Background()).Msg(migrationStartingMsg)
 	driver, err := postgres.WithInstance(instance, &postgres.Config{})
 	if err != nil {
-		logging.Error(context.Background()).Err(err).Msg(migrationCouldNotConnectDBMsg)
+		logging.Error(context.Background()).ErrType(err).Msg(migrationCouldNotConnectDBMsg)
 		return err
 	}
 
@@ -54,7 +56,7 @@ func executeDatabaseMigration(instance *sql.DB) error {
 	migrateDatabaseInstance, _ := migrate.NewWithDatabaseInstance("file://"+sourceUrl, config.SQL_DB_NAME, driver)
 	if migrateDatabaseInstance != nil {
 		if err = migrateDatabaseInstance.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-			logging.Error(context.Background()).Err(err).Msg(migrationExecutionWithErrorMsg)
+			logging.Error(context.Background()).ErrType(err).Msg(migrationExecutionWithErrorMsg)
 			return err
 		}
 	}

@@ -1,7 +1,10 @@
+// Modified in the ezequiel454 fork for forge M3; see FORK.md
+
 package logging
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +20,8 @@ const (
 	CorrelationIDParam string = "correlationId"
 	callerParam        string = "caller"
 	errorParam         string = "error"
+	errorTypeParam     string = "errorType"
+	sqlStateParam      string = "sqlState"
 )
 
 var (
@@ -38,6 +43,18 @@ func Initialize() {
 	if logger == nil {
 		logger = slog.New(createLogHandler())
 	}
+}
+
+// InitializeWith (re)initializes the logging on w, replacing any logger created before,
+// so the destination of the logs is injected instead of bound to os.Stdout once per process
+// (a nil w means os.Stdout). It is for the composition root and for tests; call it before
+// anything logs, as the logger is not synchronized against concurrent replacement.
+func InitializeWith(w io.Writer) {
+	if w == nil {
+		w = os.Stdout
+	}
+	logOutput = w
+	logger = slog.New(createLogHandler())
 }
 
 // createLogHandler creates and returns the appropriate log handler based on the environment and log level.
@@ -108,9 +125,41 @@ func (l *Logging) AddParam(key string, val any) *Logging {
 	return l
 }
 
+// ErrType records only what is safe to log about an error whose text may carry data from
+// outside the process (a driver or a transport error quotes hosts, users, URLs, DSNs or
+// values): the dynamic type of the error and, when it exposes one, its 5 character SQLSTATE.
+// The message of the error is never logged. Prefer it to Err for any error that is not fixed
+// text written by the application.
+func (l *Logging) ErrType(err error) *Logging {
+	if err == nil {
+		return l
+	}
+	l.params[errorTypeParam] = fmt.Sprintf("%T", err)
+	var coded interface{ SQLState() string }
+	if errors.As(err, &coded) {
+		if code := coded.SQLState(); validSQLState(code) {
+			l.params[sqlStateParam] = code
+		}
+	}
+	return l
+}
+
+func validSQLState(code string) bool {
+	if len(code) != 5 {
+		return false
+	}
+	for _, r := range code {
+		if (r < '0' || r > '9') && (r < 'A' || r > 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
 // Err sets the error field in the Logging instance.
 // When an error is added, the log will include a specific field for the error.
-// error.
+// The field is the full text of the error (err.Error()): use ErrType for errors that
+// can carry data from outside the process.
 // Example:
 //
 //	err := errors.New("database connection failed")

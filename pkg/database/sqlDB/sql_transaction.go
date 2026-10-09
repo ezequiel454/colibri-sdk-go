@@ -1,3 +1,5 @@
+// Modified in the ezequiel454 fork for forge M3; see FORK.md
+
 package sqlDB
 
 import (
@@ -70,14 +72,14 @@ func (t *sqlTransaction) ExecuteInInstance(ctx context.Context, instance *sql.DB
 	ctx = context.WithValue(ctx, SqlTxContext, tx)
 
 	if err = fn(ctx); err != nil {
-		logging.Error(ctx).Err(err).Msg(transactionExecutionLogMsg)
+		logging.Error(ctx).ErrType(err).Msg(transactionExecutionLogMsg)
 		transactionChannel <- err
 		return err
 	}
 
 	if err = tx.Commit(); err != nil {
 		fErr := fmt.Errorf(transactionCommitErrorMsg, err)
-		logging.Error(ctx).Err(err).Msg(transactionCommitLogMsg)
+		logging.Error(ctx).ErrType(err).Msg(transactionCommitLogMsg)
 		transactionChannel <- fErr
 		return fErr
 	}
@@ -95,7 +97,7 @@ func (t *sqlTransaction) beginTransaction(ctx context.Context, instance *sql.DB)
 
 	if err != nil {
 		fErr := fmt.Errorf(transactionStartErrorMsg, err)
-		logging.Error(ctx).Err(err).Msg(transactionStartLogMsg)
+		logging.Error(ctx).ErrType(err).Msg(transactionStartLogMsg)
 		return nil, nil, fErr
 	}
 

@@ -1,3 +1,5 @@
+// Modified in the ezequiel454 fork for forge M3; see FORK.md
+
 package sqlDB
 
 import (
@@ -13,6 +15,6 @@ import (
 // Error: returns any error encountered during closing.
 func closer(o io.Closer) {
 	if err := o.Close(); err != nil {
-		logging.Error(context.Background()).Err(err).Msg("could not close statement")
+		logging.Error(context.Background()).ErrType(err).Msg("could not close statement")
 	}
 }

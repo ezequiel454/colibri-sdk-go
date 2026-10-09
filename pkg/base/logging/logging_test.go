@@ -1,3 +1,5 @@
+// Modified in the ezequiel454 fork for forge M3; see FORK.md
+
 package logging
 
 import (
@@ -161,4 +163,42 @@ func TestLogging(t *testing.T) {
 			})
 		}
 	})
+}
+
+type stateErr struct{ code string }
+
+func (e stateErr) Error() string    { return "SENTINEL_driver_text host=db.internal password=SENTINEL" }
+func (e stateErr) SQLState() string { return e.code }
+
+func TestErrTypeLogsNeverTheMessage(t *testing.T) {
+	var buf bytes.Buffer
+	defer func() { logger = nil; logOutput = os.Stdout }()
+	config.ENVIRONMENT = config.ENVIRONMENT_PRODUCTION
+	InitializeWith(&buf)
+
+	Error(context.Background()).ErrType(stateErr{"28P01"}).Msg("boom")
+	Error(context.Background()).ErrType(errors.New("SENTINEL_plain")).Msg("plain")
+	Error(context.Background()).ErrType(stateErr{"bad;state"}).Msg("badstate")
+	Error(context.Background()).ErrType(nil).Msg("nil")
+
+	out := buf.String()
+	assert.NotContains(t, out, "SENTINEL")
+	assert.NotContains(t, out, "password")
+	assert.Contains(t, out, `"errorType":"logging.stateErr"`)
+	assert.Contains(t, out, `"sqlState":"28P01"`)
+	assert.NotContains(t, out, "bad;state")
+	assert.Contains(t, out, `"errorType":"*errors.errorString"`)
+}
+
+func TestInitializeWithReplacesTheLogger(t *testing.T) {
+	var a, b bytes.Buffer
+	defer func() { logger = nil; logOutput = os.Stdout }()
+	config.ENVIRONMENT = config.ENVIRONMENT_PRODUCTION
+	InitializeWith(&a)
+	Info(context.Background()).Msg("first")
+	InitializeWith(&b)
+	Info(context.Background()).Msg("second")
+	assert.Contains(t, a.String(), "first")
+	assert.NotContains(t, a.String(), "second")
+	assert.Contains(t, b.String(), "second")
 }

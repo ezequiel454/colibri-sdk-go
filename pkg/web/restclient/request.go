@@ -1,3 +1,5 @@
+// Modified in the ezequiel454 fork for forge M3; see FORK.md
+
 package restclient
 
 import (
@@ -24,7 +26,7 @@ const (
 	requestCtxIsEmpty    string = "context is empty"
 	requestClientIsEmpty string = "client is empty"
 	requestMethodIsEmpty string = "http method is empty"
-	retriesWarnMsg       string = "[%dx] call to the url '%s'. status code = %d | general error: %v | response error: %v"
+	retriesWarnMsg       string = "[%dx] call failed, retrying. method = %s | status code = %d"
 )
 
 // Request struct for http requests
@@ -72,9 +74,12 @@ func (rc Request[T, E]) Call() (response ResponseData[T, E]) {
 
 		time.Sleep(rc.getSleepDuration())
 		if rc.Client.retries != 0 {
+			// neither the URL (its query, user info or path can hold secrets), nor the text of
+			// the error (the transport quotes the URL) nor the error body of the peer is logged
 			logging.
 				Warn(rc.Ctx).
-				Msgf(retriesWarnMsg, execution+1, rc.getUrl(), response.StatusCode(), response.Error(), response.ErrorBody())
+				ErrType(response.Error()).
+				Msgf(retriesWarnMsg, execution+1, rc.HttpMethod, response.StatusCode())
 		}
 	}
 

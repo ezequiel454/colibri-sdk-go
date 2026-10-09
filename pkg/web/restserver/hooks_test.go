@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -534,3 +536,42 @@ func TestLogScanChild(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	fmt.Println("CHILD_DONE")
 }
+
+func TestResetClearsTheRegistration(t *testing.T) {
+	isolateServerGlobals(t)
+	AddRoutes([]Route{{URI: "/v1/x", Method: http.MethodGet, Function: func(WebContext) {}}})
+	Use(nopMiddleware{})
+	CustomAuthMiddleware(nopAuth{})
+	SetErrorWriter(func(WebContext, int, error) {})
+	SetCorrelationPolicy(func(string) string { return "" }, "X-Id")
+
+	Reset()
+	assert.Empty(t, srvRoutes)
+	assert.Empty(t, customMiddlewares)
+	assert.Nil(t, customAuth)
+	assert.Nil(t, GetErrorWriter())
+	n, h := correlationSettings()
+	assert.Nil(t, n)
+	assert.Empty(t, h)
+
+	// a server composed after Reset serves the routes registered after it
+	observer.InitializeWith(func(os.Signal) {})
+	var hit atomic.Int32
+	AddRoutes([]Route{{URI: "/v1/y", Method: http.MethodGet, Function: func(ctx WebContext) { hit.Add(1); ctx.EmptyResponse(204) }}})
+	ls := startServer(t)
+	resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(ls.port) + "/v1/y")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 204, resp.StatusCode)
+	assert.Equal(t, int32(1), hit.Load())
+	assert.Panics(t, Reset, "Reset must refuse to run under a live server")
+	ls.shutdown(t)
+}
+
+type nopMiddleware struct{}
+
+func (nopMiddleware) Apply(WebContext) *MiddlewareError { return nil }
+
+type nopAuth struct{}
+
+func (nopAuth) Apply(WebContext) (*security.AuthenticationContext, error) { return nil, nil }

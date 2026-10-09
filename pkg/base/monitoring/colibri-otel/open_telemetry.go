@@ -1,7 +1,10 @@
+// Modified in the ezequiel454 fork for forge M3; see FORK.md
+
 package colibri_otel
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -22,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
@@ -122,7 +126,7 @@ func StartOpenTelemetryMonitoring() colibrimonitoringbase.Monitoring {
 		),
 	)
 	if err != nil {
-		logging.Fatal(ctx).Msgf("Building OTEL resource: %v", err)
+		logging.Fatal(ctx).ErrType(err).Msg("Building OTEL resource")
 	}
 
 	// ── Trace exporter + provider ─────────────────────────────────────────────
@@ -138,15 +142,19 @@ func StartOpenTelemetryMonitoring() colibrimonitoringbase.Monitoring {
 
 	traceExporter, err := otlptracehttp.New(ctx, traceOptions...)
 	if err != nil {
-		logging.Fatal(ctx).Msgf("Creating OTLP trace exporter: %v", err)
+		logging.Fatal(ctx).ErrType(err).Msg("Creating OTLP trace exporter")
 	}
 
 	tracerProvider := sdktrace.NewTracerProvider(
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 		sdktrace.WithResource(res),
-		sdktrace.WithSpanProcessor(sdktrace.NewBatchSpanProcessor(traceExporter)),
+		sdktrace.WithSpanProcessor(sdktrace.NewBatchSpanProcessor(sanitizingExporter{next: traceExporter})),
 	)
 	otel.SetTracerProvider(tracerProvider)
+	// the default handler prints the export errors, which quote the endpoint URL, with the
+	// standard logger (text on stderr): they go through the JSON logger, by type only,
+	// at most once every 30 s
+	otel.SetErrorHandler(newSafeErrorHandler())
 
 	// ── Metric exporter + provider ────────────────────────────────────────────
 	metricsEndpoint := config.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
@@ -166,12 +174,18 @@ func StartOpenTelemetryMonitoring() colibrimonitoringbase.Monitoring {
 
 	metricExporter, err := otlpmetrichttp.New(ctx, metricOptions...)
 	if err != nil {
-		logging.Fatal(ctx).Msgf("Creating OTLP metric exporter: %v", err)
+		logging.Fatal(ctx).ErrType(err).Msg("Creating OTLP metric exporter")
 	}
 
 	meterProvider := sdkmetric.NewMeterProvider(
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),
+		// every instrument (otelsql puts the driver error text on db.sql.error) loses the
+		// attributes of the same deny-list the spans use
+		sdkmetric.WithView(sanitizingMetricView()),
+		// an attribute removed by a view is kept on the exemplars as a "filtered attribute":
+		// without exemplars it leaves nowhere
+		sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter),
 	)
 	otel.SetMeterProvider(meterProvider)
 
@@ -233,8 +247,12 @@ func (m *MonitoringOpenTelemetry) GetTransactionInContext(ctx context.Context) a
 }
 
 func (m *MonitoringOpenTelemetry) NoticeError(transaction any, err error) {
-	transaction.(trace.Span).RecordError(err)
-	transaction.(trace.Span).SetStatus(codes.Error, err.Error())
+	// only the type of the error leaves the process: its text can quote URLs, hosts,
+	// queries or values (v0.2.5 exported err.Error() as the exception message and as the
+	// status description)
+	span := transaction.(trace.Span)
+	span.AddEvent("exception", trace.WithAttributes(semconv.ExceptionType(fmt.Sprintf("%T", err))))
+	span.SetStatus(codes.Error, "")
 }
 
 func (m *MonitoringOpenTelemetry) GetSQLDBDriverName() string {
@@ -248,7 +266,7 @@ func (m *MonitoringOpenTelemetry) GetSQLDBDriverName() string {
 		otelsql.WithMeterProvider(m.meterProvider),
 	)
 	if err != nil {
-		logging.Fatal(context.Background()).Msgf("could not get sql db driver name: %v", err)
+		logging.Fatal(context.Background()).ErrType(err).Msg("could not get sql db driver name")
 	}
 	return driverName
 }
@@ -266,7 +284,7 @@ func (m *MonitoringOpenTelemetry) Counter(name, description, unit string) colibr
 		metric.WithUnit(unit),
 	)
 	if err != nil {
-		logging.Fatal(context.Background()).Msgf("Creating counter %s: %v", name, err)
+		logging.Fatal(context.Background()).ErrType(err).Msgf("Creating counter %s", name)
 	}
 	m.counters[name] = c
 	return &otelCounter{instrument: c}
@@ -283,7 +301,7 @@ func (m *MonitoringOpenTelemetry) Histogram(name, description, unit string) coli
 		metric.WithUnit(unit),
 	)
 	if err != nil {
-		logging.Fatal(context.Background()).Msgf("Creating histogram %s: %v", name, err)
+		logging.Fatal(context.Background()).ErrType(err).Msgf("Creating histogram %s", name)
 	}
 	m.histograms[name] = h
 	return &otelHistogram{instrument: h}
@@ -300,7 +318,7 @@ func (m *MonitoringOpenTelemetry) Gauge(name, description, unit string) colibrim
 		metric.WithUnit(unit),
 	)
 	if err != nil {
-		logging.Fatal(context.Background()).Msgf("Creating gauge %s: %v", name, err)
+		logging.Fatal(context.Background()).ErrType(err).Msgf("Creating gauge %s", name)
 	}
 	m.gauges[name] = g
 	return &otelGauge{instrument: g}
@@ -312,10 +330,10 @@ func (m *MonitoringOpenTelemetry) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := m.tracerProvider.Shutdown(ctx); err != nil {
-		logging.Warn(ctx).Msgf("OTEL tracer provider shutdown: %v", err)
+		logging.Warn(ctx).ErrType(err).Msg("OTEL tracer provider shutdown")
 	}
 	if err := m.meterProvider.Shutdown(ctx); err != nil {
-		logging.Warn(ctx).Msgf("OTEL meter provider shutdown: %v", err)
+		logging.Warn(ctx).ErrType(err).Msg("OTEL meter provider shutdown")
 	}
 }
 
@@ -356,4 +374,27 @@ func kindToOpenTelemetry(kind colibrimonitoringbase.SpanKind) trace.SpanKind {
 	default:
 		return trace.SpanKindUnspecified
 	}
+}
+
+// ── Error handler ─────────────────────────────────────────────────────────────
+
+const errorHandlerInterval = 30 * time.Second
+
+func newSafeErrorHandler() otel.ErrorHandler {
+	var mu sync.Mutex
+	var last time.Time
+	return otel.ErrorHandlerFunc(func(err error) {
+		if err == nil {
+			return
+		}
+		mu.Lock()
+		now := time.Now()
+		if !last.IsZero() && now.Sub(last) < errorHandlerInterval {
+			mu.Unlock()
+			return
+		}
+		last = now
+		mu.Unlock()
+		logging.Warn(context.Background()).ErrType(err).Msg("OTEL error")
+	})
 }

@@ -1,3 +1,5 @@
+// Modified in the ezequiel454 fork for forge M3; see FORK.md
+
 package sqlDB
 
 import (
@@ -40,7 +42,7 @@ func Initialize() {
 	sqlDB.SetMaxIdleConns(config.SQL_DB_MAX_IDLE_CONNS)
 
 	if err := executeDatabaseMigration(sqlDB); err != nil {
-		logging.Fatal(context.Background()).Err(err).Msg(dbMigrationError)
+		logging.Fatal(context.Background()).ErrType(err).Msg(dbMigrationError)
 	}
 
 	sqlDBInstance = sqlDB
@@ -50,11 +52,11 @@ func Initialize() {
 func NewSQLDatabaseInstance(name, databaseURL string) *sql.DB {
 	sqlDB, err := sql.Open(monitoring.GetSQLDBDriverName(), databaseURL)
 	if err != nil {
-		logging.Fatal(context.Background()).Err(err).Msgf(dbConnectionError, name)
+		logging.Fatal(context.Background()).ErrType(err).Msgf(dbConnectionError, name)
 	}
 
 	if err = sqlDB.Ping(); err != nil {
-		logging.Fatal(context.Background()).Err(err).Msgf(dbConnectionError, name)
+		logging.Fatal(context.Background()).ErrType(err).Msgf(dbConnectionError, name)
 	}
 
 	observer.Attach(sqlDBObserver{name, sqlDB})
